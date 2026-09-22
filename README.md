@@ -1,97 +1,101 @@
 # Robot Voice Assistant
 
-This local prototype accepts an audio or video file, transcribes speech with
-Whisper, detects the transcript language, asks an OpenRouter model for a short
-reply, and saves an ElevenLabs spoken reply as an MP3 file. Local document
-search is optional.
+This is a local public-demo prototype for a Linux mini-PC with an external
+microphone and speaker. It supports both a saved audio/video file and a live,
+press-to-record microphone conversation.
 
-## Project structure
+## Flow
 
-- `main.py`: coordinates the full file-to-speech flow.
-- `stt.py`: transcribes local media files with Whisper.
-- `language_utils.py`: detects a language code and readable label.
-- `llm.py`: sends text and optional context to OpenRouter.
-- `rag.py`: optionally indexes and searches local documents with ChromaDB.
-- `tts.py`: saves an ElevenLabs MP3 response.
+`audio file or mic -> faster-whisper -> language choice -> safety check -> OpenAI -> safety check -> ElevenLabs -> speaker`
+
+`main.py` coordinates the flow. `stt.py` handles transcription, `mic.py`
+records speech using voice activity detection, `llm.py` calls OpenAI, `tts.py`
+creates and plays an ElevenLabs MP3, `safety.py` moderates input and spoken
+output, and `rag.py` remains optional document lookup.
 
 ## Setup
 
-FFmpeg must be installed for Whisper to read common audio and video formats.
+Linux needs FFmpeg and a working audio backend for the connected microphone and
+speaker. On Debian/Ubuntu, install them with:
 
 ```bash
-pip install -r requirements.txt
+sudo apt update
+sudo apt install ffmpeg portaudio19-dev libsndfile1
 ```
 
-Create or update `.env` with the following values:
+Then create a virtual environment and install the Python packages:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Add your API keys and ElevenLabs voice ID to `.env`. Never commit `.env`.
 
 ```env
-OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTER_MODEL=openrouter/free
-
+OPENAI_API_KEY=your_openai_key
+OPENAI_MODEL=gpt-4o-mini
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_DEFAULT=your_elevenlabs_voice_id
-ELEVENLABS_MODEL=eleven_multilingual_v2
-TTS_OUTPUT_PATH=output/reply.mp3
-
-RAG_ENABLED=false
-RAG_DOCUMENTS_DIR=knowledge_base
-RAG_PERSIST_DIRECTORY=chroma_db
-
-# The multilingual Whisper model. For English-only use: small.en and en.
 WHISPER_MODEL=small
-WHISPER_LANGUAGE=
+INPUT_DEVICE_NAME=
+OUTPUT_DEVICE_NAME=
 ```
 
-Optional language-specific ElevenLabs voices can be added to `.env`:
+## Choose audio devices
 
-```env
-ELEVENLABS_VOICE_EN=your_english_voice_id
-ELEVENLABS_VOICE_AR=your_arabic_voice_id
-ELEVENLABS_VOICE_HI=your_hindi_voice_id
-ELEVENLABS_VOICE_RU=your_russian_voice_id
-```
-
-## Test each stage
-
-Transcription only:
+Run this command to list devices before configuring them:
 
 ```bash
-python3 -c "from stt import transcribe_audio; print(transcribe_audio('sample.mp4'))"
+python3 -c "from mic import audio_device_summary; print('\\n'.join(audio_device_summary()))"
 ```
 
-LLM only:
+Copy a distinctive part of the microphone or speaker name into `INPUT_DEVICE_NAME`
+or `OUTPUT_DEVICE_NAME`. Leave either setting blank to use the Linux system
+default. A configured name that cannot be found stops mic mode with a clear
+message instead of silently using the wrong device.
 
-```bash
-python3 -c "from llm import get_llm_reply; print(get_llm_reply('Hello', language='English'))"
-```
+## Run
 
-TTS only:
-
-```bash
-python3 -c "from tts import speak_text; print(speak_text('Hello from the robot assistant', language='en'))"
-```
-
-Build and test RAG:
-
-```bash
-mkdir -p knowledge_base
-printf 'The robot assistant can answer questions from recorded audio files.' > knowledge_base/example.txt
-python3 -c "from rag import build_or_update_knowledge_base; print(build_or_update_knowledge_base())"
-python3 -c "from rag import get_context; print(get_context('What can the robot assistant do?'))"
-```
-
-Full pipeline without RAG:
+Test the existing file workflow:
 
 ```bash
 python3 main.py sample.mp4
 ```
 
-Full pipeline with RAG after building the index:
+Start live mic mode:
 
 ```bash
-RAG_ENABLED=true python3 main.py sample.mp4
+python3 main.py
 ```
 
-Microphone input, live conversations, and continuous memory are not built yet.
-RAG is optional: if `chroma_db` does not exist, the assistant continues without
-document context.
+Press Enter to start listening. The recorder waits for speech, keeps 300 ms of
+pre-roll, and stops after about 900 ms of silence (or a 30-second cap). Press
+`Q` then Enter to reset the saved language for the session. Press Ctrl+C to exit.
+
+If the microphone hears only noise, too little speech, or a clearly unusable
+transcript, the LLM is skipped and the robot asks the person to repeat it.
+
+## Safety and logging
+
+The transcript is moderated before it reaches the LLM. If that moderation service
+is temporarily unavailable, input is allowed so the demo can continue. The final
+reply is moderated before TTS; if that service is unavailable, the robot speaks a
+safe network fallback instead. `logs/session_YYYY-MM-DD.jsonl` records turns for
+troubleshooting and is ignored by Git.
+
+TTS sets a shared `MIC_BLOCKED` flag during playback, so a new recording waits
+until the robot finishes speaking.
+
+## Optional RAG
+
+RAG stays off unless `RAG_ENABLED=true`. Build a local index only after placing
+`.txt`, `.md`, or `.pdf` files in `knowledge_base/`:
+
+```bash
+python3 -c "from rag import build_or_update_knowledge_base; print(build_or_update_knowledge_base())"
+```
+
+No index is not an error: the assistant simply runs without document context.

@@ -1,11 +1,20 @@
-openai
+openai>=1.0,<2.0
 python-dotenv
-openai-whisper
-elevenlabs
-langchain-chroma
-langchain-community
-langchain-huggingface
-langchain-text-splitters
+faster-whisper
+elevenlabs>=1.0,<2.0
+langchain-chroma>=0.1,<0.2
+langchain-community>=0.3,<0.4
+langchain-huggingface>=0.1,<0.2
+langchain-text-splitters>=0.3,<0.4
+chromadb>=0.5,<0.6
 sentence-transformers
 pypdf
 langdetect
+sounddevice
+soundfile
+numpy
+scipy
+pygame
+webrtcvad
+# webrtcvad currently imports pkg_resources, supplied by setuptools before v81.
+setuptools<81

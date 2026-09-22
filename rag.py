@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ load_dotenv()
 DEFAULT_DOCUMENTS_DIR = os.getenv("RAG_DOCUMENTS_DIR", "knowledge_base")
 DEFAULT_DATABASE_DIR = os.getenv("RAG_PERSIST_DIRECTORY", "chroma_db")
 DEFAULT_COLLECTION = "robot_knowledge"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def _rag_dependencies():
@@ -22,6 +24,13 @@ def _rag_dependencies():
     except ImportError as error:
         raise RuntimeError("RAG packages are missing. Run: pip install -r requirements.txt") from error
     return Chroma, Document, HuggingFaceEmbeddings, RecursiveCharacterTextSplitter
+
+
+@lru_cache(maxsize=1)
+def _get_embeddings():
+    """Load the local embedding model once and reuse it within this process."""
+    _, _, HuggingFaceEmbeddings, _ = _rag_dependencies()
+    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
 
 
 def _load_documents(documents_dir: Path, document_class):
@@ -56,13 +65,13 @@ def build_or_update_knowledge_base(
     if not source_directory.is_dir():
         return 0
 
-    Chroma, Document, HuggingFaceEmbeddings, TextSplitter = _rag_dependencies()
+    Chroma, Document, _, TextSplitter = _rag_dependencies()
     documents = _load_documents(source_directory, Document)
     if not documents:
         return 0
 
     chunks = TextSplitter(chunk_size=800, chunk_overlap=120).split_documents(documents)
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embeddings = _get_embeddings()
     database_directory = Path(persist_directory)
 
     if database_directory.exists():
@@ -97,8 +106,8 @@ def get_context(query: str, k: int = 3, persist_directory: str = DEFAULT_DATABAS
         return ""
 
     try:
-        Chroma, _, HuggingFaceEmbeddings, _ = _rag_dependencies()
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        Chroma, _, _, _ = _rag_dependencies()
+        embeddings = _get_embeddings()
         store = Chroma(
             collection_name=DEFAULT_COLLECTION,
             persist_directory=str(database_directory),

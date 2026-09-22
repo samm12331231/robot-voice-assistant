@@ -14,6 +14,7 @@ venv/
 
 # Generated assistant data
 output/
+logs/
 chroma_db/
 knowledge_base/
 
