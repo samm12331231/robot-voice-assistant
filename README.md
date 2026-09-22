@@ -37,12 +37,32 @@ Add your API keys and ElevenLabs voice ID to `.env`. Never commit `.env`.
 ```env
 OPENAI_API_KEY=your_openai_key
 OPENAI_MODEL=gpt-4o-mini
+WEB_SEARCH_ENABLED=false
+WEB_SEARCH_PROVIDER=openai
 ELEVENLABS_API_KEY=your_elevenlabs_key
 ELEVENLABS_VOICE_DEFAULT=your_elevenlabs_voice_id
 WHISPER_MODEL=small
 INPUT_DEVICE_NAME=
 OUTPUT_DEVICE_NAME=
 ```
+
+## Optional web search
+
+Set `WEB_SEARCH_ENABLED=true` to allow current public-information lookups.
+The default provider, `openai`, uses the existing OpenAI web-search tool.
+To try Firecrawl's page-based search instead, create a Firecrawl API key and add
+the following to your private `.env` file:
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=firecrawl
+FIRECRAWL_API_KEY=your_firecrawl_key
+```
+
+Firecrawl sends up to three source pages to the LLM and tells it not to invent
+facts missing from those pages. This reduces, but cannot completely eliminate,
+wrong or outdated web information. Greetings, robot small talk, and the built-in
+Dubai time/weather lookup do not use a Firecrawl search.
 
 ## Choose audio devices
 
