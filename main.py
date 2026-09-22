@@ -5,7 +5,12 @@ from pathlib import Path
 import sys
 
 import suppress_warnings  # Must run before pygame is imported by tts.py.
-from language_utils import detect_language, normalize_language, should_use_previous_language
+from language_utils import (
+    detect_language,
+    detect_script_language,
+    normalize_language,
+    should_use_previous_language,
+)
 from llm import get_llm_reply, warm_up_llm
 from logging_utils import log_turn
 from rag import get_context
@@ -31,9 +36,14 @@ def _speak(text: str, language: str = "en") -> None:
 
 
 def _current_language(transcript: str, whisper_language: str | None) -> tuple[str, str]:
-    if should_use_previous_language(transcript) and SESSION_STATE["last_language_code"]:
-        return normalize_language(SESSION_STATE["last_language_code"]) or ("en", "English")
-    return normalize_language(whisper_language) or detect_language(transcript)
+    script_language = detect_script_language(transcript)
+    if script_language:
+        return script_language
+
+    text_language = detect_language(transcript)
+    if should_use_previous_language(transcript):
+        return text_language
+    return normalize_language(whisper_language) or text_language
 
 
 def _handle_unclear(transcript: str = "") -> None:

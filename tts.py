@@ -85,7 +85,8 @@ def speak_text(
         audio = client.text_to_speech.convert(
             voice_id=_voice_id_for(language),
             model_id=os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
-            output_format="mp3_44100_128",
+            output_format="mp3_22050_32",
+            optimize_streaming_latency=3,
             text=text,
         )
         with output_path.open("wb") as output_file:

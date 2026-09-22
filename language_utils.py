@@ -1,5 +1,7 @@
 """Small helpers for choosing one language across the assistant flow."""
 
+import re
+
 LANGUAGE_NAMES = {
     "en": "English",
     "ar": "Arabic",
@@ -46,6 +48,22 @@ LANGUAGE_NAMES = {
 }
 
 
+def detect_script_language(text: str) -> tuple[str, str] | None:
+    """Recognize scripts that are more reliable than a conflicting STT label."""
+    script_patterns = {
+        "ar": r"[\u0600-\u06ff]",
+        "hi": r"[\u0900-\u097f]",
+        "ru": r"[\u0400-\u04ff]",
+        "zh": r"[\u4e00-\u9fff]",
+        "ja": r"[\u3040-\u30ff]",
+        "ko": r"[\uac00-\ud7af]",
+    }
+    for code, pattern in script_patterns.items():
+        if re.search(pattern, text):
+            return code, LANGUAGE_NAMES[code]
+    return None
+
+
 def normalize_language(language_code: str | None) -> tuple[str, str] | None:
     """Return a language code and label, preserving unknown Whisper codes."""
     if not language_code:
@@ -58,6 +76,9 @@ def normalize_language(language_code: str | None) -> tuple[str, str] | None:
 
 def detect_language(text: str) -> tuple[str, str]:
     """Return a language code and label, defaulting safely to English."""
+    script_language = detect_script_language(text)
+    if script_language:
+        return script_language
     if len(text.strip()) < 4:
         return "en", "English"
 
