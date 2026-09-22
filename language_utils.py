@@ -49,18 +49,31 @@ LANGUAGE_NAMES = {
 
 
 def detect_script_language(text: str) -> tuple[str, str] | None:
-    """Recognize scripts that are more reliable than a conflicting STT label."""
+    """Return only script-specific language hints, not broad script families."""
     script_patterns = {
-        "ar": r"[\u0600-\u06ff]",
-        "hi": r"[\u0900-\u097f]",
-        "ru": r"[\u0400-\u04ff]",
-        "zh": r"[\u4e00-\u9fff]",
         "ja": r"[\u3040-\u30ff]",
         "ko": r"[\uac00-\ud7af]",
+        "hi": r"[\u0900-\u097f]",
     }
     for code, pattern in script_patterns.items():
         if re.search(pattern, text):
             return code, LANGUAGE_NAMES[code]
+    return None
+
+
+def has_non_latin_script(text: str) -> bool:
+    """Return True when text contains a script that can correct a wrong English label."""
+    return bool(re.search(r"[\u0400-\u04ff\u0600-\u06ff\u0900-\u097f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", text))
+
+
+def _script_family_fallback(text: str) -> tuple[str, str] | None:
+    """Use a broad script only when no specific language signal is available."""
+    if re.search(r"[\u0600-\u06ff]", text):
+        return "ar", "Arabic"
+    if re.search(r"[\u0400-\u04ff]", text):
+        return "ru", "Russian"
+    if re.search(r"[\u3400-\u9fff]", text):
+        return "zh", "Chinese"
     return None
 
 
@@ -74,13 +87,11 @@ def normalize_language(language_code: str | None) -> tuple[str, str] | None:
     return code, LANGUAGE_NAMES.get(code, code.upper())
 
 
-def detect_language(text: str) -> tuple[str, str]:
-    """Return a language code and label, defaulting safely to English."""
+def detect_language_confident(text: str) -> tuple[str, str] | None:
+    """Return a fresh language signal when text supplies enough evidence."""
     script_language = detect_script_language(text)
     if script_language:
         return script_language
-    if len(text.strip()) < 4:
-        return "en", "English"
 
     try:
         from langdetect import DetectorFactory, detect_langs
@@ -88,10 +99,15 @@ def detect_language(text: str) -> tuple[str, str]:
         DetectorFactory.seed = 0
         result = detect_langs(text)[0]
         if result.prob >= 0.70:
-            return normalize_language(result.lang) or ("en", "English")
+            return normalize_language(result.lang)
     except Exception:
         pass
-    return "en", "English"
+    return _script_family_fallback(text)
+
+
+def detect_language(text: str) -> tuple[str, str]:
+    """Return a language code and label, defaulting safely to English."""
+    return detect_language_confident(text) or ("en", "English")
 
 
 def should_use_previous_language(transcript: str) -> bool:

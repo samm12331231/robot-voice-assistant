@@ -6,15 +6,15 @@ import sys
 
 import suppress_warnings  # Must run before pygame is imported by tts.py.
 from language_utils import (
-    detect_language,
+    detect_language_confident,
     detect_script_language,
+    has_non_latin_script,
     normalize_language,
-    should_use_previous_language,
 )
 from llm import get_llm_reply, warm_up_llm
 from logging_utils import log_turn
 from rag import get_context
-from safety import NETWORK_FALLBACK, SAFE_FALLBACK, check_reply, check_transcript, warm_up_moderation
+from safety import check_reply, check_transcript, fallback_message, warm_up_moderation
 from stt import is_transcript_unclear, transcribe_audio, warm_up_stt
 from tts import speak_text
 
@@ -22,7 +22,6 @@ from tts import speak_text
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE") or None
 RAG_ENABLED = os.getenv("RAG_ENABLED", "false").lower() == "true"
-UNCLEAR_FALLBACK = "I didn’t quite understand that. Could you repeat it again?"
 SESSION_STATE = {"last_language_code": None, "turn_count": 0}
 
 
@@ -36,22 +35,34 @@ def _speak(text: str, language: str = "en") -> None:
 
 
 def _current_language(transcript: str, whisper_language: str | None) -> tuple[str, str]:
-    script_language = detect_script_language(transcript)
-    if script_language:
-        return script_language
+    """Choose the best fresh language signal, using session memory only as a fallback."""
+    whisper_result = normalize_language(whisper_language)
+    text_result = detect_language_confident(transcript)
+    script_result = detect_script_language(transcript)
 
-    text_language = detect_language(transcript)
-    if should_use_previous_language(transcript):
-        return text_language
-    return normalize_language(whisper_language) or text_language
+    if whisper_result:
+        if text_result and text_result[0] != whisper_result[0]:
+            if whisper_result[0] == "en" and has_non_latin_script(transcript):
+                return text_result
+            if text_result[0] == "en" and not has_non_latin_script(transcript):
+                return text_result
+        return whisper_result
+    if text_result:
+        return text_result
+    if script_result:
+        return script_result
+    previous_code = SESSION_STATE["last_language_code"]
+    return normalize_language(previous_code) or ("en", "English")
 
 
-def _handle_unclear(transcript: str = "") -> None:
+def _handle_unclear(transcript: str = "", language: str | None = None) -> None:
     print("Transcript unclear.")
-    _speak(UNCLEAR_FALLBACK)
+    language_code = language or SESSION_STATE["last_language_code"] or "en"
+    reply = fallback_message("unclear", language_code)
+    _speak(reply, language_code)
     log_turn(
-        turn=SESSION_STATE["turn_count"], transcript=transcript, language="en",
-        transcript_flagged=False, reply=UNCLEAR_FALLBACK, reply_replaced=False, stt_unclear=True,
+        turn=SESSION_STATE["turn_count"], transcript=transcript, language=language_code,
+        transcript_flagged=False, reply=reply, reply_replaced=False, stt_unclear=True,
     )
 
 
@@ -59,20 +70,21 @@ def _handle_transcript(user_message: str, whisper_language: str | None) -> None:
     """Run quality, safety, RAG, LLM, reply safety, and TTS for one transcript."""
     SESSION_STATE["turn_count"] += 1
     turn = SESSION_STATE["turn_count"]
+    language_code, language_name = _current_language(user_message, whisper_language)
     if is_transcript_unclear(user_message):
-        _handle_unclear(user_message)
+        _handle_unclear(user_message, language_code)
         return
 
-    language_code, language_name = _current_language(user_message, whisper_language)
     print(f"You said: {user_message}")
     print(f"Detected language: {language_name} ({language_code})")
 
     if not check_transcript(user_message):
         print("Transcript blocked by safety check.")
-        _speak(SAFE_FALLBACK, language_code)
+        reply = fallback_message("safe", language_code)
+        _speak(reply, language_code)
         log_turn(
             turn=turn, transcript=user_message, language=language_code, transcript_flagged=True,
-            reply=SAFE_FALLBACK, reply_replaced=True, stt_unclear=False,
+            reply=reply, reply_replaced=True, stt_unclear=False,
         )
         return
 
@@ -87,9 +99,9 @@ def _handle_transcript(user_message: str, whisper_language: str | None) -> None:
         reply = get_llm_reply(user_message, context=context, language=language_name)
     except RuntimeError as error:
         print(f"LLM unavailable: {error}")
-        reply = NETWORK_FALLBACK
+        reply = fallback_message("network", language_code)
 
-    safe_reply = check_reply(reply)
+    safe_reply = check_reply(reply, language_code)
     reply_replaced = safe_reply != reply
     print(f"Assistant: {safe_reply}")
     _speak(safe_reply, language_code)

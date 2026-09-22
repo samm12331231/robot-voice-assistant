@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from uuid import uuid4
 
 from audio_state import MIC_BLOCKED
@@ -50,6 +52,37 @@ def _play_audio(path: Path) -> None:
             pass
 
 
+def _stream_audio_to_default_speaker(audio, output_path: Path) -> None:
+    """Save streamed MP3 chunks while ffplay begins default-speaker playback early."""
+    try:
+        process = subprocess.Popen(
+            ["ffplay", "-autoexit", "-nodisp", "-loglevel", "error", "-i", "pipe:0"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise RuntimeError(f"Could not start streamed audio playback: {error}") from error
+
+    MIC_BLOCKED.set()
+    try:
+        with output_path.open("wb") as output_file:
+            for chunk in audio:
+                if not chunk:
+                    continue
+                output_file.write(chunk)
+                process.stdin.write(chunk)
+                process.stdin.flush()
+        process.stdin.close()
+        if process.wait() != 0:
+            raise RuntimeError("Streamed audio playback failed.")
+    except Exception as error:
+        process.kill()
+        raise RuntimeError(f"Could not stream audio playback: {error}") from error
+    finally:
+        MIC_BLOCKED.clear()
+
+
 def speak_text(
     text: str,
     language: str = "en",
@@ -82,17 +115,31 @@ def speak_text(
 
     try:
         client = ElevenLabs(api_key=api_key, timeout=8)
-        audio = client.text_to_speech.convert(
+        model_id = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+        stream_to_default_speaker = (
+            play_audio
+            and not os.getenv("OUTPUT_DEVICE_NAME")
+            and shutil.which("ffplay") is not None
+        )
+        create_audio = (
+            client.text_to_speech.convert_as_stream
+            if stream_to_default_speaker
+            else client.text_to_speech.convert
+        )
+        audio = create_audio(
             voice_id=_voice_id_for(language),
-            model_id=os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
+            model_id=model_id,
             output_format="mp3_22050_32",
             optimize_streaming_latency=3,
             text=text,
         )
-        with output_path.open("wb") as output_file:
-            for chunk in audio:
-                if chunk:
-                    output_file.write(chunk)
+        if stream_to_default_speaker:
+            _stream_audio_to_default_speaker(audio, output_path)
+        else:
+            with output_path.open("wb") as output_file:
+                for chunk in audio:
+                    if chunk:
+                        output_file.write(chunk)
     except RuntimeError:
         raise
     except Exception as error:
@@ -101,7 +148,7 @@ def speak_text(
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise RuntimeError("ElevenLabs returned no audio data.")
 
-    if play_audio:
+    if play_audio and not stream_to_default_speaker:
         _play_audio(output_path)
 
     return str(output_path)

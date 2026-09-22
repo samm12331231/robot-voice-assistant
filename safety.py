@@ -7,9 +7,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SAFE_FALLBACK = "I'm here to help with respectful questions. What would you like to know?"
-NETWORK_FALLBACK = "I'm sorry, I can't respond right now. Please try again in a moment."
+FALLBACK_MESSAGES = {
+    "en": {
+        "unclear": "I didn't quite understand that. Could you repeat it again?",
+        "safe": "I'm here to help. What would you like to know?",
+        "network": "I'm sorry, I can't respond right now. Please try again in a moment.",
+    },
+    "ar": {
+        "unclear": "لم أفهمك جيدًا. هل يمكنك تكرار ذلك من فضلك؟",
+        "safe": "أنا هنا للمساعدة. كيف يمكنني مساعدتك؟",
+        "network": "عذرًا، لا أستطيع الرد الآن. يرجى المحاولة مرة أخرى بعد قليل.",
+    },
+    "hi": {
+        "unclear": "मैं आपको ठीक से समझ नहीं पाया। क्या आप दोबारा कह सकते हैं?",
+        "safe": "मैं मदद के लिए यहाँ हूँ। मैं आपकी कैसे मदद कर सकता हूँ?",
+        "network": "माफ़ कीजिए, मैं अभी जवाब नहीं दे सकता। कृपया थोड़ी देर बाद फिर कोशिश करें।",
+    },
+    "ur": {
+        "unclear": "میں آپ کو ٹھیک سے سمجھ نہیں سکا۔ کیا آپ دوبارہ کہہ سکتے ہیں؟",
+        "safe": "میں مدد کے لیے یہاں ہوں۔ میں آپ کی کیسے مدد کر سکتا ہوں؟",
+        "network": "معذرت، میں ابھی جواب نہیں دے سکتا۔ براہ کرم تھوڑی دیر بعد دوبارہ کوشش کریں۔",
+    },
+}
+SAFE_FALLBACK = FALLBACK_MESSAGES["en"]["safe"]
+NETWORK_FALLBACK = FALLBACK_MESSAGES["en"]["network"]
 EMERGENCY_BLOCK: list[str] = []
+
+
+def fallback_message(kind: str, language: str = "en") -> str:
+    """Return a localized fallback, with English as the safe default."""
+    code = language.lower().split("-")[0]
+    return FALLBACK_MESSAGES.get(code, FALLBACK_MESSAGES["en"])[kind]
 
 
 def _contains_emergency_block(text: str) -> bool:
@@ -41,14 +69,14 @@ def check_transcript(transcript: str) -> bool:
         return True
 
 
-def check_reply(reply: str) -> str:
+def check_reply(reply: str, language: str = "en") -> str:
     """Return a safe reply; never speak an unmoderated reply after an API failure."""
     if _contains_emergency_block(reply):
-        return SAFE_FALLBACK
+        return fallback_message("safe", language)
     try:
-        return SAFE_FALLBACK if _is_flagged(reply) else reply
+        return fallback_message("safe", language) if _is_flagged(reply) else reply
     except RuntimeError:
-        return NETWORK_FALLBACK
+        return fallback_message("network", language)
 
 
 def warm_up_moderation() -> None:
