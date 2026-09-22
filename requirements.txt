@@ -1,0 +1,11 @@
+openai
+python-dotenv
+openai-whisper
+elevenlabs
+langchain-chroma
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+sentence-transformers
+pypdf
+langdetect

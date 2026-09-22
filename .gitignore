@@ -1,0 +1,29 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS Finder metadata
+.DS_Store
+
+# Generated assistant data
+output/
+chroma_db/
+knowledge_base/
+
+# Local test media and Whisper output
+sample.mp4
+sample.json
+sample.srt
+sample.tsv
+sample.txt
+sample.vtt
+*.wav
+*.mp3
+*.m4a
