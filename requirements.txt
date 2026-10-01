@@ -1,0 +1,15 @@
+openai>=1.0,<2.0
+python-dotenv
+tzdata
+elevenlabs>=1.0,<2.0
+langdetect
+sounddevice
+soundfile
+numpy
+scipy
+pygame
+webrtcvad; sys_platform != "win32"
+# The original package has no Windows wheel for Python 3.12.
+webrtcvad-wheels; sys_platform == "win32"
+# webrtcvad currently imports pkg_resources, supplied by setuptools before v81.
+setuptools<81
