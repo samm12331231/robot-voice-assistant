@@ -66,7 +66,13 @@ def specific_safety_refusal(transcript: str, language: str = "en") -> str | None
             "zh": "我不能帮助提供制作武器的说明。",
         }
         return replies.get(code, replies["en"])
-    if "beat him up" in normalized or "beat her up" in normalized or "beat them up" in normalized:
+    if (
+        "beat him up" in normalized
+        or "beat her up" in normalized
+        or "beat them up" in normalized
+        or "how do i hurt" in normalized
+        or "how can i hurt" in normalized
+    ):
         replies = {
             "en": "I can't help hurt someone. Take a moment away and talk it out calmly.",
             "ar": "لا أستطيع المساعدة في إيذاء شخص. خذ لحظة وناقش الأمر بهدوء.",

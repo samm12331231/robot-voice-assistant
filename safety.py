@@ -1,6 +1,7 @@
 """Small public-demo safety checks for input and spoken output."""
 
 import os
+import re
 
 from dotenv import load_dotenv
 from fallback_messages import fallback_message
@@ -40,6 +41,25 @@ NETWORK_FALLBACK = FALLBACK_MESSAGES["en"]["network"]
 EMERGENCY_BLOCK: list[str] = []
 
 
+def _is_harmless_meaning_question(text: str) -> bool:
+    """Allow educational definitions without treating a quoted rude word as abuse."""
+    normalized = " ".join((text or "").casefold().split())
+    return bool(re.match(
+        r"^(?:what does|what is the meaning of|what's the meaning of|define|meaning of)\b.+\b(?:mean|meaning)(?:\s+in\s+[\w\s]+)?\??$",
+        normalized,
+    ))
+
+
+def _is_non_actionable_fictional_request(text: str) -> bool:
+    """Allow clearly fictional prompts that explicitly reject real-world usability."""
+    normalized = " ".join((text or "").casefold().split())
+    return (
+        "fictional" in normalized
+        and bool(re.search(r"\b(?:villain|story|character|plot)\b", normalized))
+        and bool(re.search(r"\b(?:not|without)\b.*\b(?:actionable|usable|real life)\b", normalized))
+    )
+
+
 def _contains_emergency_block(text: str) -> bool:
     lower_text = text.lower()
     return any(term.lower() in lower_text for term in EMERGENCY_BLOCK if term.strip())
@@ -63,20 +83,51 @@ def check_transcript(transcript: str) -> bool:
     """Return False for blocked input; network failures remain usable for the demo."""
     if _contains_emergency_block(transcript):
         return False
+    if _is_harmless_meaning_question(transcript):
+        return True
+    if _is_non_actionable_fictional_request(transcript):
+        return True
     try:
         return not _is_flagged(transcript)
     except RuntimeError:
         return True
 
 
-def check_reply(reply: str, language: str = "en") -> str:
-    """Return a safe reply; never speak an unmoderated reply after an API failure."""
+def check_reply(reply: str, language: str = "en", _diagnostic_id: str = "") -> str:
+    """Return a safe reply; never speak an unmoderated reply after an API failure.
+    
+    Args:
+        reply: The text to check for safety
+        language: Language code for fallback messages
+        _diagnostic_id: Internal ID for diagnostic logging (do not set externally)
+    
+    Returns:
+        Safe reply text or fallback message
+    """
+    diag_tag = f"[SAFETY::{_diagnostic_id}]" if _diagnostic_id else "[SAFETY]"
+    
     if _contains_emergency_block(reply):
-        return fallback_message("safe", language)
+        fallback = fallback_message("safe", language)
+        print(f"{diag_tag} EMERGENCY_BLOCK triggered → fallback")
+        return fallback
+    
     try:
-        return fallback_message("safe", language) if _is_flagged(reply) else reply
-    except RuntimeError:
-        return fallback_message("network", language)
+        flagged = _is_flagged(reply)
+        if flagged:
+            fallback = fallback_message("safe", language)
+            print(f"{diag_tag} MODERATION_FLAG (reply truncated to 80 chars)")
+            print(f"{diag_tag}   LLM reply: {reply[:80]}...")
+            print(f"{diag_tag}   Fallback:  {fallback[:80]}...")
+            return fallback
+        else:
+            print(f"{diag_tag} MODERATION_PASS (reply truncated to 80 chars)")
+            print(f"{diag_tag}   Reply: {reply[:80]}...")
+            return reply
+    except RuntimeError as error:
+        fallback = fallback_message("network", language)
+        print(f"{diag_tag} MODERATION_ERROR: {type(error).__name__}")
+        print(f"{diag_tag}   Network fallback used")
+        return fallback
 
 
 def warm_up_moderation() -> None:

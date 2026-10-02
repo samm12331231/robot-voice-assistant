@@ -51,7 +51,7 @@ LANGUAGE_NAMES = {
 EVENT_LANGUAGE_MODE = "event_en_ar_hi_zh"
 EVENT_SUPPORTED_LANGUAGE_CODES = frozenset({"en", "ar", "hi", "zh"})
 EVENT_LANGUAGE_MESSAGES = {
-    "en": "Sorry, I can only speak English, Arabic, Hindi, and Chinese.",
+    "en": "I can speak English, Arabic, Hindi, and Chinese.",
     "ar": "أدعم حاليًا الإنجليزية والعربية والهندية والصينية المندرينية.",
     "hi": "मैं वर्तमान में अंग्रेज़ी, अरबी, हिंदी और मंदारिन चीनी का समर्थन करता हूँ।",
     "zh": "我目前支持英语、阿拉伯语、印地语和简体中文。",
@@ -83,6 +83,12 @@ EVENT_LANGUAGE_GENERIC_REPLIES = {
     "hi": "हाँ, मैं हिंदी में मदद कर सकता हूँ। आप क्या कहलवाना या समझाना चाहते हैं?",
     "zh": "是的，我可以用中文帮忙。您想让我说什么或解释什么？",
 }
+EVENT_LANGUAGE_RESET_REPLIES = {
+    "en": "Okay, I'll answer in English.",
+    "ar": "حسنًا، سأجيب بالعربية.",
+    "hi": "ठीक है, मैं हिंदी में जवाब दूँगा।",
+    "zh": "好的，我会用中文回答。",
+}
 PHYSICAL_ACTION_UNAVAILABLE_REPLIES = {
     "en": "I can't change my volume, move closer, or wave, but I can answer your questions.",
     "ar": "لا أستطيع تغيير مستوى الصوت أو الاقتراب أو التلويح، لكن يمكنني الإجابة عن أسئلتك.",
@@ -101,6 +107,38 @@ EVENT_UNSAFE_LANGUAGE_REPLIES = {
     "hi": "मैं अंग्रेज़ी, अरबी, हिंदी और चीनी में मदद कर सकता हूँ, लेकिन अपमान या हानिकारक भाषा में मदद नहीं कर सकता।",
     "zh": "我可以用英语、阿拉伯语、印地语和中文提供帮助，但不能帮助进行侮辱或使用有害语言。",
 }
+
+CURRENT_FACT_PATTERNS = (
+    r"\bwho is the (?:current )?(?:president|prime minister)\b",
+    r"\b(?:current|latest|exact current) (?:price|value) of\b",
+    r"\bwhat happened in (?:the )?news today\b",
+    r"\b(?:latest|today'?s) news\b",
+)
+
+
+def resolve_self_correction(text: str) -> str:
+    """Return the corrected request when a visitor explicitly abandons one subject."""
+    normalized = " ".join((text or "").split()).strip()
+    match = re.match(
+        r"^(?P<before>.+?)[.?!]*\s*(?:sorry|wait)\s*,?\s*i meant\s+(?P<after>.+?)[.?!]*$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return normalized
+
+    before = match.group("before").strip(" .?!")
+    correction = match.group("after").strip(" .?!")
+    if re.match(r"^(?:what|who|where|when|why|how|tell|give|explain)\b", correction, re.IGNORECASE):
+        return f"{correction}?"
+    question = re.match(r"^(?P<stem>.*?\b(?:of|in|for)\s+).+$", before, re.IGNORECASE)
+    return f"{question.group('stem')}{correction}?" if question else correction
+
+
+def requires_verified_current_information(text: str) -> bool:
+    """Identify facts that must not be answered from a model's stale memory."""
+    normalized = (text or "").casefold()
+    return any(re.search(pattern, normalized) for pattern in CURRENT_FACT_PATTERNS)
 
 
 def is_event_language_mode(mode: str | None) -> bool:
@@ -141,9 +179,12 @@ def event_language_capability_reply(text: str) -> tuple[str, str] | None:
 def event_unsafe_language_request_reply(text: str) -> tuple[str, str] | None:
     """Refuse harmful language requests in the explicitly requested language."""
     normalized = re.sub(r"\s+", " ", (text or "").casefold()).strip()
-    if not re.search(r"\b(?:curse|insult|swear|offensive|derogatory|make fun of)\b", normalized):
+    if not re.search(r"\b(?:curse|insult\w*|swear|offensiv\w*|derogator\w*|make fun of)\b", normalized):
         return None
-    if not re.search(r"\b(?:talk|speak|communicate|say|tell|translate)\b", normalized):
+    if not re.search(
+        r"\b(?:talk|speak|communicate|say|tell|translate|make|make\s+fun\s+of)\b",
+        normalized,
+    ):
         return None
     for name, code in sorted(EVENT_LANGUAGE_CAPABILITY_NAMES.items(), key=lambda item: -len(item[0])):
         if re.search(rf"\b(?:in|talk|speak|communicate)\s+{re.escape(name)}\b", normalized):
@@ -177,6 +218,17 @@ def event_generic_language_reply(text: str) -> tuple[str, str] | None:
     return None
 
 
+def event_language_reset_reply(text: str) -> tuple[str, str] | None:
+    """Acknowledge a request to stop translating without invoking stale history."""
+    normalized = re.sub(r"\s+", " ", (text or "").casefold()).strip()
+    if not re.search(r"\b(?:stop translating|answer normally|reply normally)\b", normalized):
+        return None
+    for name, code in sorted(EVENT_LANGUAGE_CAPABILITY_NAMES.items(), key=lambda item: -len(item[0])):
+        if re.search(rf"\b(?:in\s+)?{re.escape(name)}\b", normalized):
+            return code, EVENT_LANGUAGE_RESET_REPLIES[code]
+    return None
+
+
 def strip_event_reply_language_suffix(text: str) -> str:
     """Remove a final supported-language wording clause before a live lookup.
 
@@ -200,18 +252,47 @@ def strip_event_reply_language_suffix(text: str) -> str:
 def event_requested_reply_language(text: str) -> tuple[str, str] | None:
     """Recognize a safe request for a normal reply in one supported event language."""
     normalized = re.sub(r"\s+", " ", (text or "").casefold()).strip()
-    if re.search(r"\b(?:curse|insult|swear|offensive|derogatory|make fun of)\b", normalized):
+    if re.search(r"\b(?:curse|insult\w*|swear|offensiv\w*|derogator\w*|make fun of)\b", normalized):
         return None
     if not re.search(
-        r"\b(?:joke|say something|reply|answer|explain|talk|speak|communicate|tell me|give me|show me|"
+        r"\b(?:joke|say|say something|reply|respond|answer|explain|talk|speak|communicate|tell me|give me|show me|"
         r"compliment|mean\s+in|weather|time)\b",
         normalized,
     ):
         return None
+    names = "|".join(
+        re.escape(name) for name in sorted(EVENT_LANGUAGE_CAPABILITY_NAMES, key=len, reverse=True)
+    )
+    target = re.search(
+        rf"\b(?:say|reply|respond|answer|explain|talk|speak|communicate)\b.*?\bin\s+(?P<language>{names})\b",
+        normalized,
+    )
+    if target:
+        code = EVENT_LANGUAGE_CAPABILITY_NAMES[target.group("language")]
+        return code, LANGUAGE_NAMES[code]
     for name, code in sorted(EVENT_LANGUAGE_CAPABILITY_NAMES.items(), key=lambda item: -len(item[0])):
         if re.search(rf"\b(?:in|mean\s+in)\s+{re.escape(name)}\b", normalized):
             return code, LANGUAGE_NAMES[code]
     return None
+
+
+def event_multi_response_languages(text: str) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """Parse an answer plus summary request that names two event languages."""
+    normalized = re.sub(r"\s+", " ", (text or "").casefold()).strip()
+    names = "|".join(
+        re.escape(name) for name in sorted(EVENT_LANGUAGE_CAPABILITY_NAMES, key=len, reverse=True)
+    )
+    match = re.search(
+        rf"\b(?:answer|reply|respond|explain)\b.*?\bin\s+(?P<first>{names})\b"
+        rf"\s*,?\s*(?:then|and then)\s+(?P<action>summarize|summary)\b.*?\bin\s+(?P<second>{names})\b",
+        normalized,
+    )
+    if not match:
+        return None
+    return (
+        ("answer", EVENT_LANGUAGE_CAPABILITY_NAMES[match.group("first")]),
+        ("summarize", EVENT_LANGUAGE_CAPABILITY_NAMES[match.group("second")]),
+    )
 
 
 KNOWN_LOCATION_MENTIONS = {
@@ -275,6 +356,7 @@ def _extract_live_clause_info(clause: str, names: str) -> tuple[str | None, str 
 
 def event_mixed_live_request(
     text: str,
+    previous_live_info: dict | None = None,
 ) -> tuple[str, tuple[str, str], str, tuple[str, str]] | None:
     """Parse a time and weather request that asks for two supported reply languages.
 
@@ -298,8 +380,24 @@ def event_mixed_live_request(
         code = EVENT_LANGUAGE_CAPABILITY_NAMES[shared_match.group(4)]
         return location, (first_kind, code), location, (second_kind, code)
 
+    # Handle the same shared request when no reply language is specified.
+    shared_no_language_match = re.search(
+        r"\b(?:(?P<t_first>time)\s+and\s+(?:the\s+)?weather|"
+        r"(?P<w_first>weather)\s+and\s+(?:the\s+)?time)\s+in\s+(.+?)\s*$",
+        normalized,
+    )
+    if shared_no_language_match:
+        first_kind = "weather" if shared_no_language_match.group("w_first") else "time"
+        second_kind = "time" if first_kind == "weather" else "weather"
+        location = shared_no_language_match.group(3).strip(" ,?.!")
+        return location, (first_kind, "en"), location, (second_kind, "en")
+
     # 2. Split into two clauses
-    parts = re.split(r",?\s*(?:and|then|but|while)\s+|,?\s+then\s+", normalized, maxsplit=1)
+    parts = re.split(
+        r",?\s*(?:and|or|then|but|while)\s+|,\s*(?=(?:the\s+)?(?:time|weather)\b)",
+        normalized,
+        maxsplit=1,
+    )
     if len(parts) != 2:
         return None
 
@@ -309,21 +407,54 @@ def event_mixed_live_request(
     if not (k1 and k2 and k1 != k2):
         return None
 
-    # Resolve shared language
-    if not g1:
-        g1 = g2
-    if not g2:
-        g2 = g1
+    # Preserve a final same-language suffix like "... and ... in Arabic" when the
+    # request clearly applies to both clauses. Otherwise, default each missing clause
+    # independently instead of copying an explicit language from one side to the other.
+    sentence_lang_match = re.search(
+        rf"(?:time|weather)\s+in\s+.+?(?:and|or|then|but|while)\s+(?:the\s+)?(?:time|weather)\s+in\s+.+?\s+in\s+({names})\b",
+        normalized,
+    )
+    if sentence_lang_match:
+        shared_code = EVENT_LANGUAGE_CAPABILITY_NAMES[sentence_lang_match.group(1)]
+        if not g1:
+            g1 = shared_code
+        if not g2:
+            g2 = shared_code
+    elif not g1 and not g2:
+        g1 = g2 = "en"
+    elif not g1:
+        g1 = "en"
+    elif not g2:
+        g2 = "en"
     if not (g1 and g2):
         return None
 
-    # Resolve location and pronoun "there"
+    # Resolve location and pronoun "there" without inventing a city.
+    remembered_location = (previous_live_info or {}).get("location") if previous_live_info else None
+
+    if l1 == "__THERE__" and l2 == "__THERE__":
+        if remembered_location:
+            l1 = l2 = remembered_location
+        else:
+            return None
     if l1 == "__THERE__":
-        l1 = l2
-    if l2 == "__THERE__" or not l2:
-        l2 = l1
+        if remembered_location and not l2:
+            l1 = remembered_location
+        elif not l2 or l2 == "__THERE__":
+            return None
+        else:
+            l1 = l2
+    if l2 == "__THERE__":
+        if remembered_location and not l1:
+            l2 = remembered_location
+        elif not l1 or l1 == "__THERE__":
+            return None
+        else:
+            l2 = l1
     if not l1:
         l1 = l2
+    if not l2:
+        l2 = l1
     if not (l1 and l2):
         return None
 
@@ -369,6 +500,8 @@ def physical_action_unavailable_reply(text: str, language_code: str) -> str | No
         r"(?:make|set)\s+(?:the\s+)?volume\s+louder|volume\s+louder)\b",
         normalized,
     ):
+        return None
+    if re.search(r"\b(?:what|why|how|explain|tell me)\b", normalized):
         return None
     return PHYSICAL_ACTION_UNAVAILABLE_REPLIES.get(
         language_code, PHYSICAL_ACTION_UNAVAILABLE_REPLIES["en"]

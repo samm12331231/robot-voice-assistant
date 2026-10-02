@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import sys
 import time
 
@@ -9,6 +10,7 @@ import suppress_warnings  # Must run before pygame is imported by tts.py.
 from fallback_messages import specific_safety_refusal
 from live_info import live_info_direct_reply, live_info_failure_reply
 from language_utils import (
+    LANGUAGE_NAMES,
     arabic_hindi_then_arabic_time_request,
     arabic_hindi_time_arabic_weather_request,
     arabic_request_time_first,
@@ -18,12 +20,16 @@ from language_utils import (
     event_language_policy_reply,
     event_unsafe_language_request_reply,
     event_generic_language_reply,
+    event_language_reset_reply,
     event_mixed_live_request,
+    event_multi_response_languages,
     event_requested_language_code,
     event_requested_reply_language,
     event_supported_language_message,
     physical_action_unavailable_reply,
     public_event_joke_reply,
+    requires_verified_current_information,
+    resolve_self_correction,
     strip_event_reply_language_suffix,
     is_event_language_mode,
     is_company_fact_request,
@@ -33,6 +39,10 @@ from language_utils import (
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE") or None
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "en")
+LIVE_CONTEXT_FOLLOWUP_PATTERN = re.compile(
+    r"\b(?:explain|describe|tell me about)\s+(?:it|that|this)\b",
+    re.IGNORECASE,
+)
 LANGUAGE_MODE = os.getenv("LANGUAGE_MODE", "")
 
 
@@ -45,6 +55,12 @@ SESSION_STATE = {
     "turn_count": 0,
     "history": [],
     "last_live_info": None,
+}
+CURRENT_FACT_FALLBACKS = {
+    "en": "I can't verify current political, market, or news information right now.",
+    "ar": "لا أستطيع التحقق من المعلومات السياسية أو السوقية أو الإخبارية الحالية الآن.",
+    "hi": "मैं अभी वर्तमान राजनीतिक, बाज़ार या समाचार जानकारी की पुष्टि नहीं कर सकता।",
+    "zh": "我目前无法核实最新的政治、市场或新闻信息。",
 }
 
 
@@ -59,6 +75,16 @@ def _debug_timing(stage: str, started_at: float) -> None:
     """Emit opt-in stage timing without changing the normal console output."""
     if os.getenv("MIC_DEBUG") == "1":
         print(f"MIC_DEBUG: {stage}_duration={time.perf_counter() - started_at:.3f}s")
+
+
+def _check_reply_with_diagnostics(check_reply, reply: str, language: str, diagnostic_id: str) -> str:
+    """Run output safety while remaining compatible with lightweight test doubles."""
+    try:
+        return check_reply(reply, language, _diagnostic_id=diagnostic_id)
+    except TypeError as error:
+        if "_diagnostic_id" not in str(error):
+            raise
+        return check_reply(reply, language)
 
 
 def _speak(text: str, language: str = "en") -> None:
@@ -123,6 +149,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         parse_translation_intent, translation_only_reply,
     )
 
+    user_message = resolve_self_correction(user_message)
     SESSION_STATE["turn_count"] += 1
     turn = SESSION_STATE["turn_count"]
     language_choice, is_uncertain = choose_reply_language(
@@ -139,6 +166,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
     if is_transcript_unclear(user_message):
         if os.getenv("MIC_DEBUG") == "1":
             print("MIC_DEBUG: transcript was unclear; LLM was skipped.")
+        print("[ROUTE] UNCLEAR_TRANSCRIPT_PATH")
         _handle_unclear(user_message, language_code, speak)
         return
 
@@ -152,6 +180,14 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
     live_kind = live_info_kind(lookup_message)
     explicit_location = extract_explicit_location(lookup_message)
     followup_location = weather_followup_location(lookup_message, previous_live_info)
+    if (
+        previous_live_info
+        and not live_kind
+        and LIVE_CONTEXT_FOLLOWUP_PATTERN.search(user_message)
+    ):
+        live_kind = previous_live_info.get("kind")
+        followup_location = previous_live_info.get("location")
+        explicit_location = followup_location
     if not live_kind and followup_location and is_location_clarification(lookup_message):
         live_kind = "weather"
     if live_kind and followup_location:
@@ -163,6 +199,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         or any(intent.language_code not in {"en", "ar", "hi", "zh"} for intent in multi_translations)
     ):
         reply = event_supported_language_message(language_code)
+        print(f"[ROUTE] EVENT_MODE_UNSUPPORTED_LANGUAGE_PATH")
         print(f"Assistant: {reply}")
         if speak:
             _speak(reply, language_code if language_code in {"ar", "hi", "zh"} else "en")
@@ -175,6 +212,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         reply = "Hello! Please ask me a question in the language you prefer."
         if speak:
             _speak(reply, language_code)
+        print(f"[ROUTE] UNCERTAIN_LANGUAGE_PATH")
         print(f"Detected language: uncertain ({language_code})")
         print(f"Assistant: {reply}")
         return
@@ -184,6 +222,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
 
     if not check_transcript(user_message):
         print("Transcript blocked by safety check.")
+        print(f"[ROUTE] TRANSCRIPT_BLOCKED_PATH")
         reply = (
             unsafe_language_reply[1]
             if unsafe_language_reply
@@ -203,6 +242,7 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
     language_policy_reply = event_language_policy_reply(user_message) if event_mode else None
     if language_policy_reply:
         reply_language_code, reply = language_policy_reply
+        print(f"[ROUTE] LANGUAGE_POLICY_PATH")
         print(f"Assistant: {reply}")
         if speak:
             _speak(reply, reply_language_code)
@@ -277,9 +317,34 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         )
         return
 
-    mixed_live_request = event_mixed_live_request(user_message) if event_mode else None
+    mixed_live_request = (
+        event_mixed_live_request(user_message, previous_live_info) if event_mode else None
+    )
     if mixed_live_request:
         first_location, first_request, second_location, second_request = mixed_live_request
+        remembered_location = (previous_live_info or {}).get("location")
+        if first_location == "__THERE__" and second_location == "__THERE__":
+            if not remembered_location:
+                reply = "Which city or place do you mean?"
+                safe_reply = _check_reply_with_diagnostics(
+                    check_reply, reply, "en", "mixed_there_unresolved"
+                )
+                print(f"[ROUTE] MIXED_THERE_UNRESOLVED_PATH")
+                print(f"Assistant: {safe_reply}")
+                if speak:
+                    _speak(safe_reply, "en")
+                SESSION_STATE["last_language_code"] = "en"
+                SESSION_STATE["history"] = [
+                    *SESSION_STATE["history"],
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": safe_reply},
+                ][-4:]
+                log_turn(
+                    turn=turn, transcript=user_message, language="en", transcript_flagged=False,
+                    reply=safe_reply, reply_replaced=safe_reply != reply, stt_unclear=False,
+                )
+                return
+            first_location = second_location = remembered_location
         replies = []
         for location, (kind, reply_code) in (
             (first_location, first_request), (second_location, second_request)
@@ -387,10 +452,89 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         )
         return
 
+    language_reset_reply = event_language_reset_reply(user_message) if event_mode else None
+    if language_reset_reply:
+        reply_language_code, reply = language_reset_reply
+        print("[ROUTE] LANGUAGE_RESET_PATH")
+        print(f"Assistant: {reply}")
+        if speak:
+            _speak(reply, reply_language_code)
+        SESSION_STATE["last_language_code"] = reply_language_code
+        SESSION_STATE["history"] = [
+            *SESSION_STATE["history"],
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": reply},
+        ][-4:]
+        log_turn(
+            turn=turn, transcript=user_message, language=reply_language_code,
+            transcript_flagged=False, reply=reply, reply_replaced=False, stt_unclear=False,
+        )
+        return
+
     requested_reply_language = (
         event_requested_reply_language(user_message) if event_mode else None
     )
     reply_language_code, reply_language_name = requested_reply_language or language_choice
+
+    multi_response_languages = event_multi_response_languages(user_message) if event_mode else None
+    if multi_response_languages:
+        if not SESSION_STATE["history"]:
+            reply = "What would you like me to answer first?"
+            reply_language_code = multi_response_languages[0][1]
+        else:
+            from llm import get_llm_reply
+
+            (_, first_code), (_, second_code) = multi_response_languages
+            first_reply = get_llm_reply(
+                "Answer the visitor's immediately previous request directly.",
+                language=LANGUAGE_NAMES[first_code], history=SESSION_STATE["history"], use_web=False,
+            )
+            second_reply = get_llm_reply(
+                "Summarize that answer in one short sentence.",
+                language=LANGUAGE_NAMES[second_code],
+                history=[*SESSION_STATE["history"], {"role": "assistant", "content": first_reply}],
+                use_web=False,
+            )
+            reply = f"{first_reply} {second_reply}"
+            reply_language_code = second_code
+        safe_reply = _check_reply_with_diagnostics(
+            check_reply, reply, reply_language_code, "multi_language_reply"
+        )
+        print("[ROUTE] MULTI_LANGUAGE_REPLY_PATH")
+        print(f"Assistant: {safe_reply}")
+        if speak:
+            _speak(safe_reply, reply_language_code)
+        SESSION_STATE["history"] = [
+            *SESSION_STATE["history"],
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": safe_reply},
+        ][-4:]
+        log_turn(
+            turn=turn, transcript=user_message, language=reply_language_code,
+            transcript_flagged=False, reply=safe_reply, reply_replaced=safe_reply != reply,
+            stt_unclear=False,
+        )
+        return
+
+    if (
+        requires_verified_current_information(user_message)
+        and os.getenv("WEB_SEARCH_ENABLED", "false").strip().casefold() != "true"
+    ):
+        reply = CURRENT_FACT_FALLBACKS.get(reply_language_code, CURRENT_FACT_FALLBACKS["en"])
+        print("[ROUTE] CURRENT_FACT_VERIFICATION_PATH")
+        print(f"Assistant: {reply}")
+        if speak:
+            _speak(reply, reply_language_code)
+        SESSION_STATE["history"] = [
+            *SESSION_STATE["history"],
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": reply},
+        ][-4:]
+        log_turn(
+            turn=turn, transcript=user_message, language=reply_language_code,
+            transcript_flagged=False, reply=reply, reply_replaced=False, stt_unclear=False,
+        )
+        return
 
     physical_reply = physical_action_unavailable_reply(user_message, reply_language_code)
     if physical_reply:
@@ -443,12 +587,15 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
         except RuntimeError as error:
             print(f"LLM unavailable: {error}")
             reply = fallback_message("network", translation.language_code)
-        safe_reply = check_reply(reply, translation.language_code)
+        safe_reply = _check_reply_with_diagnostics(
+            check_reply, reply, translation.language_code, "translation_path"
+        )
         if safe_reply == fallback_message("safe", translation.language_code):
             safe_reply = local_event_translation(
                 translation.phrase, translation.language_code
             ) or safe_reply
         safe_reply = translation_only_reply(safe_reply)
+        print(f"[ROUTE] TRANSLATION_PATH")
         print(f"Assistant: {safe_reply}")
         if speak:
             _speak(safe_reply, translation.language_code)
@@ -483,16 +630,29 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
 
     needs_location_clarification = (
         (live_kind is not None and has_location_reference(lookup_message) and not followup_location)
-        or (is_location_clarification(lookup_message) and not followup_location)
+        or (live_kind is not None and is_ambiguous_time_location(explicit_location))
+        # A correction that still names a live intent is actionable.  For example,
+        # "What time is it in Paris? Wait, I meant Dubai" should fetch Dubai time,
+        # whereas "I meant Dubai" alone still needs a clarification.
+        or (live_kind is None and is_location_clarification(lookup_message) and not followup_location)
     )
     if needs_location_clarification:
         location = extract_explicit_location(lookup_message)
+        subject = "time" if live_kind == "time" else "weather"
         reply = (
-            f"Are you asking for the weather in {location}?"
+            "Please tell me the city or province in Canada."
+            if location and location.casefold() == "canada"
+            else
+            f"Which {location} do you mean? Please include a state, province, or country."
+            if location and is_ambiguous_time_location(location)
+            else f"Are you asking for the {subject} in {location}?"
             if location
             else "Which city or place do you mean?"
         )
-        safe_reply = check_reply(reply, "en")
+        safe_reply = _check_reply_with_diagnostics(
+            check_reply, reply, "en", "location_clarification"
+        )
+        print(f"[ROUTE] LOCATION_CLARIFICATION_PATH")
         print(f"Assistant: {safe_reply}")
         if speak:
             _speak(safe_reply, "en")
@@ -519,8 +679,14 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
             else f"What time is it in {followup_location}?"
         )
     live_started_at = time.perf_counter()
-    live_context = get_live_context(live_request, followup_location)
+    live_context = (
+        get_live_context(live_request)
+        if followup_location
+        else get_live_context(live_request, followup_location)
+    )
     _debug_timing("live_info", live_started_at)
+    if live_kind or followup_location:
+        print("[ROUTE] LIVE_INFO_PATH")
     if live_context:
         context_parts.append(live_context)
         print(
@@ -597,10 +763,13 @@ def _handle_transcript(user_message: str, whisper_language: str | None, speak: b
             print(f"LLM unavailable: {error}")
             reply = fallback_message("network", language_code)
 
-    safe_reply = check_reply(reply, reply_language_code)
+    safe_reply = _check_reply_with_diagnostics(
+        check_reply, reply, reply_language_code, "llm_normal"
+    )
     if safe_reply == fallback_message("safe", reply_language_code):
         safe_reply = public_event_joke_reply(user_message, reply_language_code) or safe_reply
     reply_replaced = safe_reply != reply
+    print(f"[ROUTE] LLM_NORMAL_PATH")
     print(f"Assistant: {safe_reply}")
     if speak:
         _speak(safe_reply, reply_language_code)

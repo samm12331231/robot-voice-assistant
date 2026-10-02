@@ -65,7 +65,7 @@ LANGUAGE_LOCATION_BLACKLIST = frozenset({
     "عربي", "عربية", "بالعربية", "هندي", "هندية", "بالهندية",
     "صيني", "صينية", "بالصينية", "انجليزي", "إنجليزية", "بالانجليزية", "اردو",
 })
-AMBIGUOUS_TIME_LOCATIONS = {"canada"}
+AMBIGUOUS_TIME_LOCATIONS = {"canada", "springfield", "washington"}
 LOCATION_FOLLOWUP_CUES = (
     "talking about", "i mean", "we mean", "meant", "the location", "that location",
 )
@@ -226,6 +226,7 @@ def _localize_live_location(location: str, language_code: str) -> str:
 
 def _localize_time_value(value: str, language_code: str) -> str:
     """Avoid leaking English weekday, month, and timezone labels into local replies."""
+    value = re.sub(r"\s*\([A-Za-z_]+/[A-Za-z_]+\)\.?$", "", value).strip()
     if language_code == "en":
         return value
     match = re.match(r"(\d{1,2}:\d{2})\s*(?:AM|PM)?", value, flags=re.IGNORECASE)
@@ -420,9 +421,9 @@ def has_location_reference(user_message: str) -> bool:
     return bool(LOCATION_REFERENCE_PATTERN.search(user_message))
 
 
-def is_ambiguous_time_location(location: str) -> bool:
-    """Return whether a location is too broad to have one safe timezone."""
-    return _normalize_location(location) in AMBIGUOUS_TIME_LOCATIONS
+def is_ambiguous_time_location(location: str | None) -> bool:
+    """Return whether a named place needs a state, province, or city clarification."""
+    return bool(location) and _normalize_location(location) in AMBIGUOUS_TIME_LOCATIONS
 
 
 def is_location_clarification(user_message: str) -> bool:

@@ -79,6 +79,11 @@ class BossQuestionRegressionTests(unittest.TestCase):
                 self.assertEqual(actual[0], language)
                 self.assertNotIn("English only", actual[1])
 
+        self.assertEqual(
+            event_unsafe_language_request_reply("Make fun of me in Hindi.")[0],
+            "hi",
+        )
+
     def test_combined_language_requests_reach_the_requested_language_path(self):
         cases = (
             ("Can you talk in Arabic and tell me a joke in Arabic?", "Arabic"),
@@ -161,6 +166,21 @@ class BossQuestionRegressionTests(unittest.TestCase):
             ),
             ("dubai", ("time", "ar"), "dubai", ("weather", "hi")),
         )
+        self.assertEqual(
+            event_mixed_live_request(
+                "Tell me the weather in Dubai in Arabic, the time in Tokyo in Hindi."
+            ),
+            ("dubai", ("weather", "ar"), "tokyo", ("time", "hi")),
+        )
+        self.assertEqual(
+            event_mixed_live_request("Tell me the weather and the time in Dubai."),
+            ("dubai", ("weather", "en"), "dubai", ("time", "en")),
+        )
+        self.assertIsNone(
+            event_mixed_live_request(
+                "What time is it there in Arabic, and what's the weather there in Hindi?"
+            )
+        )
         # 9. Arabic requests
         self.assertTrue(arabic_hindi_then_arabic_time_request(
             "سوي لي شي، كلم وياي في اللغة هندي وعربي، ورد علي في الهندي أول شي وبعدين عربي، شنو الوقت حالياً في دبي؟"
@@ -168,6 +188,21 @@ class BossQuestionRegressionTests(unittest.TestCase):
         self.assertTrue(arabic_hindi_time_arabic_weather_request(
             "أخبرني أولاً بالوقت في دبي باللغة الهندية ثم بالطقس في دبي باللغة العربية."
         ))
+
+    def test_mixed_live_request_rejects_unresolved_there_without_context(self):
+        self.assertIsNone(
+            event_mixed_live_request(
+                "What is the weather there in Arabic, and what is the time in Hindi?"
+            )
+        )
+
+    def test_mixed_live_request_defaults_only_the_unspecified_language(self):
+        self.assertEqual(
+            event_mixed_live_request(
+                "Tell me the weather in Dubai in Arabic and the time in Tokyo."
+            ),
+            ("dubai", ("weather", "ar"), "tokyo", ("time", "en")),
+        )
 
     def test_compliment_can_request_a_supported_reply_language(self):
         self.assertEqual(
@@ -194,6 +229,11 @@ class BossQuestionRegressionTests(unittest.TestCase):
         self.assertIn("can't", reply)
         self.assertIn("move closer", reply)
         self.assertIn("can't", physical_action_unavailable_reply("Can you wave?", "en"))
+        self.assertIsNone(
+            physical_action_unavailable_reply(
+                "What is AI, and can you wave?", "en"
+            )
+        )
 
     def test_safe_local_joke_exists_when_a_benign_model_joke_is_rejected(self):
         reply = public_event_joke_reply("Can you tell me a joke in Arabic?", "ar")
@@ -281,6 +321,73 @@ class BossQuestionRegressionTests(unittest.TestCase):
                 hindi_weather_pos = reply_line.find("दुबई में मौसम")
                 arabic_time_pos = reply_line.find("الوقت الحالي")
                 self.assertLess(hindi_weather_pos, arabic_time_pos)
+        finally:
+            main.SESSION_STATE.clear()
+            main.SESSION_STATE.update(saved_state)
+
+    def test_mixed_live_request_accepts_default_language_or_and_comma_separators(self):
+        cases = (
+            (
+                "Tell me the time in Dubai and the weather in Tokyo.",
+                ("dubai", ("time", "en"), "tokyo", ("weather", "en")),
+            ),
+            (
+                "Tell me the time in Dubai in Arabic or the weather in Tokyo in Hindi.",
+                ("dubai", ("time", "ar"), "tokyo", ("weather", "hi")),
+            ),
+            (
+                "Tell me the weather in Dubai in Arabic, the time in Tokyo in Hindi.",
+                ("dubai", ("weather", "ar"), "tokyo", ("time", "hi")),
+            ),
+        )
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(event_mixed_live_request(prompt), expected)
+
+    def test_two_there_clauses_use_only_the_immediate_live_location(self):
+        import io
+        from contextlib import redirect_stdout
+        import main
+
+        saved_state = dict(main.SESSION_STATE)
+        prompt = "What time is it there in Arabic, and what's the weather there in Hindi?"
+        try:
+            main._reset_session()
+            with (
+                patch("live_info.get_live_context") as get_live_context,
+                patch("logging_utils.log_turn"),
+                patch("safety.check_transcript", return_value=True),
+                patch("safety.check_reply", side_effect=lambda reply, _language: reply),
+                patch.dict("os.environ", {"LANGUAGE_MODE": "event_en_ar_hi_zh"}),
+            ):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    main.run_text_mode(prompt)
+                self.assertIn("Which city or place do you mean?", out.getvalue())
+                get_live_context.assert_not_called()
+
+            main.SESSION_STATE["last_live_info"] = {"kind": "weather", "location": "Dubai"}
+            with (
+                patch(
+                    "live_info.get_live_context",
+                    side_effect=lambda request: (
+                        "Live time for Dubai: 02:00 PM."
+                        if "time" in request
+                        else "Live weather for Dubai: 32°C, clear sky."
+                    ),
+                ) as get_live_context,
+                patch("logging_utils.log_turn"),
+                patch("safety.check_transcript", return_value=True),
+                patch.dict("os.environ", {"LANGUAGE_MODE": "event_en_ar_hi_zh"}),
+            ):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    main.run_text_mode(prompt)
+                self.assertIn("الوقت الحالي في دبي", out.getvalue())
+                self.assertIn("दुबई में मौसम", out.getvalue())
+                self.assertEqual(get_live_context.call_count, 2)
+                for call in get_live_context.call_args_list:
+                    self.assertIn("Dubai", call.args[0])
         finally:
             main.SESSION_STATE.clear()
             main.SESSION_STATE.update(saved_state)

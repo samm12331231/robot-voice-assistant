@@ -90,6 +90,33 @@ class LiveInfoSessionTests(unittest.TestCase):
             main.SESSION_STATE["history"][-1]["content"], "Which city or place do you mean?"
         )
 
+    def test_language_followup_reuses_previous_live_request(self):
+        with patch.object(
+            live_info, "_current_weather_context", return_value="mock weather: Dubai"
+        ) as weather:
+            self.run_turn("What's the weather in Dubai in Chinese?")
+            self.run_turn("Actually, explain it in English.")
+
+        self.assertEqual(weather.call_args.args, ("Dubai",))
+        self.assertEqual(
+            self.llm_reply.call_args.args[0],
+            "What's the weather like right now in Dubai?",
+        )
+
+    def test_time_correction_uses_the_corrected_city(self):
+        with patch.object(
+            live_info,
+            "get_live_context",
+            return_value="Live time for Dubai: 03:15 PM.",
+        ) as get_live_context:
+            self.run_turn(
+                "What time is it in Paris? Wait, I meant what time is it in Dubai?"
+            )
+
+        self.assertIn("Dubai", main.SESSION_STATE["history"][-1]["content"])
+        self.assertNotIn("weather", main.SESSION_STATE["history"][-1]["content"].casefold())
+        self.assertIn("Dubai", get_live_context.call_args.args[0])
+
     def test_canada_time_does_not_store_an_ambiguous_location(self):
         self.run_turn("What time is it in Canada?")
         self.assertIsNone(main.SESSION_STATE["last_live_info"])

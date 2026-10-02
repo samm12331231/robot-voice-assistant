@@ -85,6 +85,103 @@ class CreativeReplyTests(unittest.TestCase):
         self.assertIn("English, Arabic, Hindi, and Mandarin Chinese", prompt)
         self.assertIn("Never say that you support English only", prompt)
 
+    def test_general_prompt_requires_direct_grounded_answers(self):
+        client = Mock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="A direct answer."))]
+        )
+        with patch.object(llm, "_get_client", return_value=client):
+            llm.get_llm_reply(
+                "What are you?",
+                history=[{"role": "user", "content": "We are in Dubai."}],
+                use_web=False,
+            )
+
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("Answer the visitor's actual question first", prompt)
+        self.assertIn("Do not use generic greetings", prompt)
+        self.assertIn("Do not begin a useful answer", prompt)
+        self.assertIn("answer each clear part in the order asked", prompt)
+        self.assertIn("never proof of a factual claim", prompt)
+        self.assertIn("Never claim to have performed a physical action", prompt)
+        self.assertIn("keep named technical terms", prompt)
+        self.assertIn("clearly fictional request", prompt)
+
+    def test_wrong_script_is_retried_once_for_the_requested_language(self):
+        client = Mock()
+        client.chat.completions.create.side_effect = (
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="هذا رد عربي."))]),
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="这是中文回答。"))]),
+        )
+        with patch.object(llm, "_get_client", return_value=client):
+            reply = llm.get_llm_reply("Explain this in Chinese.", language="Chinese", use_web=False)
+
+        self.assertEqual(reply, "这是中文回答。")
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+
+    def test_prompt_allows_neutral_offensive_word_definitions(self):
+        client = Mock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="A neutral definition."))]
+        )
+        with patch.object(llm, "_get_client", return_value=client):
+            llm.get_llm_reply("What does fuck mean in Arabic?", use_web=False)
+
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("define or translate an offensive word is educational", prompt)
+
+    def test_gpt5_uses_completion_token_parameter(self):
+        client = Mock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="A GPT-5 answer."))]
+        )
+        with (
+            patch.object(llm, "_get_client", return_value=client),
+            patch.dict("os.environ", {"OPENAI_MODEL": "gpt-5.4"}),
+        ):
+            llm.get_llm_reply("What are you?", use_web=False)
+
+        request = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["max_completion_tokens"], 80)
+        self.assertNotIn("max_tokens", request)
+
+    def test_non_gpt5_keeps_legacy_token_parameter(self):
+        client = Mock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="A standard answer."))]
+        )
+        with (
+            patch.object(llm, "_get_client", return_value=client),
+            patch.dict("os.environ", {"OPENAI_MODEL": "gpt-4o"}),
+        ):
+            llm.get_llm_reply("What are you?", use_web=False)
+
+        request = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["max_tokens"], 80)
+        self.assertNotIn("max_completion_tokens", request)
+
+    def test_event_mode_rejects_english_only_claims(self):
+        client = Mock()
+        client.chat.completions.create.side_effect = [
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="I can only speak English."))]
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="I can help in English, Arabic, Hindi, and Mandarin Chinese."))]
+            ),
+        ]
+        with (
+            patch.object(llm, "_get_client", return_value=client),
+            patch.dict(
+                "os.environ",
+                {"OPENAI_MODEL": "gpt-5.4", "LANGUAGE_MODE": "event_en_ar_hi_zh"},
+            ),
+        ):
+            reply = llm.get_llm_reply("What can you do?", language="Arabic", use_web=False)
+
+        self.assertNotIn("only speak English", reply.casefold())
+        self.assertEqual(client.chat.completions.create.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,6 +76,16 @@ class LiveInfoRoutingTests(unittest.TestCase):
         self.assertIn("الوقت الحالي", reply)
         self.assertIn("دبي", reply)
         self.assertNotIn("Tuesday", reply)
+        self.assertNotIn("Asia/Dubai", reply)
+
+    def test_successful_time_reply_hides_timezone_identifier(self):
+        reply = live_info.live_info_direct_reply(
+            "time", "en", "Live time for Tokyo: 05:31 PM on Friday, October 02 (Asia/Tokyo)."
+        )
+        self.assertEqual(
+            reply,
+            "The current time in Tokyo is 05:31 PM on Friday, October 02",
+        )
 
     def test_weather_reply_translates_location_and_condition(self):
         reply = live_info.live_info_direct_reply(
